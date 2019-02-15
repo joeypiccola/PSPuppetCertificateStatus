@@ -24,33 +24,30 @@ function Get-PuppetDBNode {
         Write-Verbose "Begin $($MyInvocation.MyCommand)"
     }
     process {
-        $testNetConnection = Test-NetConnection -ComputerName $master -Port $masterPort -WarningAction SilentlyContinue
-        if ($testNetConnection.TcpTestSucceeded -eq $true) {
-            $uri = "https://$master`:$masterPort/pdb/query/v4/nodes/$node"
-            $headers = @{'X-Authentication' = $token}
-            try {
-                $result  = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
-                $content = $result.content | ConvertFrom-Json
-                if ($testExistence) {
-                    Write-Output $true
-                } else {
-                    Write-Output $content
+        $uri = "https://$master`:$masterPort/pdb/query/v4/nodes/$node"
+        $headers = @{'X-Authentication' = $token}
+        try {
+            $result = Invoke-WebRequest -Uri $uri -Method Get -Headers $headers -ErrorAction Stop
+            $content = $result.content | ConvertFrom-Json
+            if ($testExistence) {
+                Write-Output $true
+            }
+            else {
+                Write-Output $content
+            }
+        }
+        catch {
+            switch ($_.Exception.Message) {
+                'The remote server returned an error: (404) Not Found.' {
+                    Write-Warning "(404) Not Found for $node on $master."
+                    if ($testExistence -eq $true) {
+                        Write-Output $false
+                    }
                 }
-            } catch {
-                switch ($_.Exception.Message) {
-                    'The remote server returned an error: (404) Not Found.' {
-                        Write-Warning "(404) Not Found for $node on $master."
-                        if ($testExistence -eq $true) {
-                            Write-Output $false
-                        }
-                    }
-                    Default {
-                        Write-Error $_.Exception.Message
-                    }
+                Default {
+                    Write-Error $_.Exception.Message
                 }
             }
-        } else {
-            Write-Error "Test-NetConnection to $master on tcp/$masterPort failed."
         }
     }
     end {
@@ -86,38 +83,36 @@ function Get-PuppetNodeCertificateStatus {
         Write-Verbose "Begin $($MyInvocation.MyCommand)"
     }
     process {
-        $testNetConnection = Test-NetConnection -ComputerName $master -Port $masterPort -WarningAction SilentlyContinue
-        if ($testNetConnection.TcpTestSucceeded -eq $true) {
-            if ($certPwd) {
-                $certpfx = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
-                $certpfx.Import($certPath,$certPwd,'DefaultKeySet')
-            } else {
-                $certpfx = Get-PfxCertificate -FilePath $certPath
+        if ($certPwd) {
+            $certpfx = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+            $certpfx.Import($certPath, $certPwd, 'DefaultKeySet')
+        }
+        else {
+            $certpfx = Get-PfxCertificate -FilePath $certPath
+        }
+        $uri = "https://$Master`:$masterPort/puppet-ca/v1/certificate_status/$($node.tolower())"
+        try {
+            $result = Invoke-WebRequest -Method Get -Uri $uri -Certificate $certpfx -Headers @{"Content-Type" = "application/json"} -ErrorAction Stop
+            $content = $result.content | ConvertFrom-Json
+            if ($testExistence) {
+                Write-Output $true
             }
-            $uri = "https://$Master`:$masterPort/puppet-ca/v1/certificate_status/$($node.tolower())"
-            try {
-                $result  = Invoke-WebRequest -Method Get -Uri $uri -Certificate $certpfx -Headers @{"Content-Type" = "application/json"} -ErrorAction Stop
-                $content = $result.content | ConvertFrom-Json
-                if ($testExistence) {
-                    Write-Output $true
-                } else {
-                    Write-Output $content
-                }
-            } catch {
-                switch ($_) {
-                    'Resource not found.' {
-                        Write-Verbose "Resource not found for $node on $master"
-                        if ($testExistence) {
-                            Write-Output $false
-                        }
-                    }
-                    Default {
-                        Write-Error $_
+            else {
+                Write-Output $content
+            }
+        }
+        catch {
+            switch ($_) {
+                'Resource not found.' {
+                    Write-Verbose "Resource not found for $node on $master"
+                    if ($testExistence) {
+                        Write-Output $false
                     }
                 }
+                Default {
+                    Write-Error $_
+                }
             }
-        } else {
-            Write-Error "Test-NetConnection to $master on tcp/$masterPort failed."
         }
     }
     end {
@@ -148,65 +143,64 @@ function Set-PuppetNodeCertificateStatus {
         [Parameter()]
         [string]$certPwd,
         [Parameter(Mandatory)]
-        [ValidateSet('signed','revoked')]
+        [ValidateSet('signed', 'revoked')]
         [string]$desired_state
     )
     begin {
         Write-Verbose "Begin $($MyInvocation.MyCommand)"
     }
     process {
-        $testNetConnection = Test-NetConnection -ComputerName $master -Port $masterPort -WarningAction SilentlyContinue
-        if ($testNetConnection.TcpTestSucceeded -eq $true) {
-            $PuppetNodeCertificateStatusSplat = @{
-                master        = $master
-                node          = $node
-                certpath      = $certpath
-                certPwd       = $certPwd
+        $PuppetNodeCertificateStatusSplat = @{
+            master   = $master
+            node     = $node
+            certpath = $certpath
+            certPwd  = $certPwd
+        }
+        $PuppetNodeCertificateStatusResult = Get-PuppetNodeCertificateStatus @PuppetNodeCertificateStatusSplat
+        if ($PuppetNodeCertificateStatusResult) {
+            if ($PuppetNodeCertificateStatusResult.state -eq $desired_state) {
+                Write-Verbose "Cert for $node on $master already set to $desired_state."
+                return
             }
-            $PuppetNodeCertificateStatusResult = Get-PuppetNodeCertificateStatus @PuppetNodeCertificateStatusSplat
-            if ($PuppetNodeCertificateStatusResult) {
-                if ($PuppetNodeCertificateStatusResult.state -eq $desired_state) {
-                    Write-Verbose "Cert for $node on $master already set to $desired_state."
-                    return
-                } else {
-                    $nodeCertState = $PuppetNodeCertificateStatusResult.state
-                    switch ($desired_state) {
-                        'revoked' {
-                            if ($nodeCertState -eq 'requested') {
-                                Write-Verbose "Cannot revoke cert for $node on $master as it's currently `"$nodeCertState`"."
-                                return
-                            }
+            else {
+                $nodeCertState = $PuppetNodeCertificateStatusResult.state
+                switch ($desired_state) {
+                    'revoked' {
+                        if ($nodeCertState -eq 'requested') {
+                            Write-Verbose "Cannot revoke cert for $node on $master as it's currently `"$nodeCertState`"."
+                            return
                         }
-                        'signed' {
-                            if ($nodeCertState -eq 'revoked') {
-                                Write-Verbose "Cannot sign cert for $node on $master as it's currently `"$nodeCertState`"."
-                                return
-                            }
+                    }
+                    'signed' {
+                        if ($nodeCertState -eq 'revoked') {
+                            Write-Verbose "Cannot sign cert for $node on $master as it's currently `"$nodeCertState`"."
+                            return
                         }
                     }
                 }
-                if ($certPwd) {
-                    $certpfx = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
-                    $certpfx.Import($certPath,$certPwd,'DefaultKeySet')
-                } else {
-                    $certpfx = Get-PfxCertificate -FilePath $certPath
-                }
-                $uri = "https://$Master`:$masterPort/puppet-ca/v1/certificate_status/$($node.tolower())"
-                $body = "{`"desired_state`":`"$desired_state`"}"
-                try {
-                    Write-Verbose "Current state of cert for $node on $master is `"$nodeCertState`"."
-                    $result = Invoke-WebRequest -Method Put -Uri $uri -Certificate $certpfx -Headers @{"Content-Type" = "application/json"} -Body $body -ErrorAction Stop
-                    $json = $result.content | ConvertTo-Json
-                    Write-Verbose "Sucesfully set cert for $node on $master to $desired_state."
-                    Write-Output $json
-                } catch {
-                    Write-Error $_
-                }
-            } else {
-                Write-Warning "No cert found to set for $node on $master."
             }
-        } else {
-            Write-Error "Test-NetConnection to $master on tcp/$masterPort failed."
+            if ($certPwd) {
+                $certpfx = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+                $certpfx.Import($certPath, $certPwd, 'DefaultKeySet')
+            }
+            else {
+                $certpfx = Get-PfxCertificate -FilePath $certPath
+            }
+            $uri = "https://$Master`:$masterPort/puppet-ca/v1/certificate_status/$($node.tolower())"
+            $body = "{`"desired_state`":`"$desired_state`"}"
+            try {
+                Write-Verbose "Current state of cert for $node on $master is `"$nodeCertState`"."
+                $result = Invoke-WebRequest -Method Put -Uri $uri -Certificate $certpfx -Headers @{"Content-Type" = "application/json"} -Body $body -ErrorAction Stop
+                $json = $result.content | ConvertTo-Json
+                Write-Verbose "Sucesfully set cert for $node on $master to $desired_state."
+                Write-Output $json
+            }
+            catch {
+                Write-Error $_
+            }
+        }
+        else {
+            Write-Warning "No cert found to set for $node on $master."
         }
     }
     end {
@@ -242,42 +236,41 @@ function Remove-PuppetNodeCertificate {
         Write-Verbose "Begin $($MyInvocation.MyCommand)"
     }
     process {
-        $testNetConnection = Test-NetConnection -ComputerName $master -Port $masterPort -WarningAction SilentlyContinue
-        if ($testNetConnection.TcpTestSucceeded -eq $true) {
-            $getPuppetNodeCertificateStatusSplat = @{
-                master   = $master
-                node     = $node
-                certpath = $certpath
-                certPwd  = $certPwd
-            }
-            $PuppetNodeCertificateStatusResult = Get-PuppetNodeCertificateStatus @getPuppetNodeCertificateStatusSplat
-            if ($PuppetNodeCertificateStatusResult) {
-                $nodeCertState = $PuppetNodeCertificateStatusResult.state
-                if (($nodeCertState -match 'requested|signed' -and $force) -or ($nodeCertState -eq 'revoked')) {
-                    if ($certPwd) {
-                        $certpfx = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
-                        $certpfx.Import($certPath,$certPwd,'DefaultKeySet')
-                    } else {
-                        $certpfx = Get-PfxCertificate -FilePath $certPath
-                    }
-                    $uri = "https://$Master`:$masterPort/puppet-ca/v1/certificate_status/$($node.tolower())"
-                    try {
-                        Write-Verbose "Current state of cert for $node on $master is `"$nodeCertState`"."
-                        $result  = Invoke-WebRequest -Method Delete -Uri $uri -Certificate $certpfx -Headers @{"Content-Type" = "application/json"} -ErrorAction Stop
-                        $content = $result.content | ConvertFrom-Json
-                        Write-Verbose "Sucesfully deleted cert for $node on $master."
-                        Write-Output $content
-                    } catch {
-                        Write-Error $_
-                    }
-                } else {
-                    Write-Warning "Cert for $node on $master is currently $($PuppetNodeCertificateStatusResult.state). If signed, revoke it first or use -Force. If requested, sign and revoke it first or use -Force."
+        $getPuppetNodeCertificateStatusSplat = @{
+            master   = $master
+            node     = $node
+            certpath = $certpath
+            certPwd  = $certPwd
+        }
+        $PuppetNodeCertificateStatusResult = Get-PuppetNodeCertificateStatus @getPuppetNodeCertificateStatusSplat
+        if ($PuppetNodeCertificateStatusResult) {
+            $nodeCertState = $PuppetNodeCertificateStatusResult.state
+            if (($nodeCertState -match 'requested|signed' -and $force) -or ($nodeCertState -eq 'revoked')) {
+                if ($certPwd) {
+                    $certpfx = New-Object System.Security.Cryptography.X509Certificates.X509Certificate2
+                    $certpfx.Import($certPath, $certPwd, 'DefaultKeySet')
                 }
-            } else {
-                Write-Warning "No cert found to remove for $node on $master."
+                else {
+                    $certpfx = Get-PfxCertificate -FilePath $certPath
+                }
+                $uri = "https://$Master`:$masterPort/puppet-ca/v1/certificate_status/$($node.tolower())"
+                try {
+                    Write-Verbose "Current state of cert for $node on $master is `"$nodeCertState`"."
+                    $result = Invoke-WebRequest -Method Delete -Uri $uri -Certificate $certpfx -Headers @{"Content-Type" = "application/json"} -ErrorAction Stop
+                    $content = $result.content | ConvertFrom-Json
+                    Write-Verbose "Sucesfully deleted cert for $node on $master."
+                    Write-Output $content
+                }
+                catch {
+                    Write-Error $_
+                }
             }
-        } else {
-            Write-Error "Test-NetConnection to $master on tcp/$masterPort failed."
+            else {
+                Write-Warning "Cert for $node on $master is currently $($PuppetNodeCertificateStatusResult.state). If signed, revoke it first or use -Force. If requested, sign and revoke it first or use -Force."
+            }
+        }
+        else {
+            Write-Warning "No cert found to remove for $node on $master."
         }
     }
     end {
@@ -311,39 +304,36 @@ function Remove-PuppetDBNode {
         Write-Verbose "Begin $($MyInvocation.MyCommand)"
     }
     process {
-        $testNetConnection = Test-NetConnection -ComputerName $master -Port $masterPort -WarningAction SilentlyContinue
-        if ($testNetConnection.TcpTestSucceeded -eq $true) {
-            $getPuppetDBNodeSplat = @{
-                master = $master
-                node   = $node
-                token  = $token
+        $getPuppetDBNodeSplat = @{
+            master = $master
+            node   = $node
+            token  = $token
+        }
+        if (Get-PuppetDBNode @getPuppetDBNodeSplat) {
+            $uri = "https://$master`:$masterPort/pdb/cmd/v1"
+            $headers = @{
+                'X-Authentication' = $token
+                'Content-Type'     = "application/json"
             }
-            if (Get-PuppetDBNode @getPuppetDBNodeSplat) {
-                $uri = "https://$master`:$masterPort/pdb/cmd/v1"
-                $headers = @{
-                    'X-Authentication' = $token
-                    'Content-Type' = "application/json"
+            $cmdObj = [PSCustomObject]@{
+                command = 'deactivate node'
+                version = 3
+                payload = @{
+                    certname           = $node
+                    producer_timestamp = (Get-Date -Format o)
                 }
-                $cmdObj = [PSCustomObject]@{
-                    command = 'deactivate node'
-                    version = 3
-                    payload = @{
-                        certname = $node
-                        producer_timestamp = (Get-Date -Format o)
-                    }
-                } | ConvertTo-Json
-                try {
-                    $result  = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $cmdObj -ErrorAction Stop
-                    $content = $result.content | ConvertFrom-Json
-                    Write-Output $content
-                } catch {
-                    Write-Error $_
-                }
-            } else {
-                Write-Warning "No node found in Puppet DB for $node on $master."
+            } | ConvertTo-Json
+            try {
+                $result = Invoke-WebRequest -Uri $uri -Method Post -Headers $headers -Body $cmdObj -ErrorAction Stop
+                $content = $result.content | ConvertFrom-Json
+                Write-Output $content
             }
-        } else {
-            Write-Error "Test-NetConnection to $master on tcp/$masterPort failed."
+            catch {
+                Write-Error $_
+            }
+        }
+        else {
+            Write-Warning "No node found in Puppet DB for $node on $master."
         }
     }
     end {
