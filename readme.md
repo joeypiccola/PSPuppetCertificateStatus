@@ -16,7 +16,7 @@ PowerShell Core
 
 ### Get-PuppetNodeCertificateStatus
 
-Get the certificate status for a node. Use`-testExistnace` to simply return a `bool` for whether or not a certificate exists.
+Get the certificate status for a node. Use `-testExistnace` to simply return a `bool` for whether or not a certificate exists.
 
 ```powershell
 $securePwd = ConvertTo-SecureString -AsPlainText -Force -String 'secret'
@@ -62,7 +62,7 @@ Remove-PuppetNodeCertificate @removePuppetNodeCertificateSplat -Verbose
 
 ### Get-PuppetDBNode
 
-Query the PuppetDB. Use`-testExistnace` to simply return a `bool` for whether or not a node exists.
+Query the PuppetDB for a node. Use `-testExistnace` to simply return a `bool` for whether or not a node exists.
 
 ```powershell
 $getPuppetDBNodeSplat = @{
